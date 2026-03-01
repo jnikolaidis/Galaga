@@ -2001,6 +2001,9 @@ function updateChallengeStage(dt) {
 }
 
 function checkChallengeCollisions() {
+  const spriteHalf = 20;
+
+  // Player bullets vs challenge enemies
   for (let bi = bullets.length - 1; bi >= 0; bi--) {
     const b = bullets[bi];
     if (!b.active) continue;
@@ -2022,6 +2025,23 @@ function checkChallengeCollisions() {
         spawnScorePop(pts, enemy.x, enemy.y);
         playSound('enemyHit');
         checkExtraLife();
+        break;
+      }
+    }
+  }
+
+  // Flying challenge enemies vs player (body collision)
+  if (player.alive && player.invTimer <= 0) {
+    for (const enemy of challengeEnemies) {
+      if (enemy.state !== 'flying') continue;
+
+      const pw = player.dualFighter ? 30 : 20;
+      if (aabb(enemy.x - spriteHalf, enemy.y - spriteHalf, spriteHalf * 2, spriteHalf * 2,
+               player.x - pw, PLAYER_Y - 20, pw * 2, 40)) {
+        enemy.state = 'dead';
+        enemy.alive = false;
+        enemy.hp = 0;
+        killPlayer();
         break;
       }
     }
