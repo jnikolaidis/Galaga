@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# Browser-QA artifacts (Playwright MCP output)
+.playwright-mcp/
