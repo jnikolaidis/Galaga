@@ -12,7 +12,7 @@ Single-file Galaga arcade clone with Bezier curve flight paths, tractor beam cap
 No build system. Open `index.html` in a browser.
 
 ## Gotchas
-- Entire game is one `index.html` file with ~3500+ lines of inline JS
+- Entire game is one `index.html` file with ~3000 lines of inline JS
 - Sound effects synthesized procedurally via Web Audio (no audio files)
 - Sprites drawn programmatically as pixel art arrays (no image files)
 - 40 enemies with Bezier curve entry/dive paths and formation breathing

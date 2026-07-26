@@ -60,7 +60,7 @@ const SCALE = 3;
 const W = NATIVE_W * SCALE;   // 672
 const H = NATIVE_H * SCALE;   // 864
 
-// Sprite cell — each pixel of a 16x16 sprite occupies 3x3 canvas pixels
+// Sprite cell — each sprite is 24x24; each sprite pixel is rendered as CELL x CELL canvas pixels
 const CELL = 2;
 
 // Player
@@ -90,6 +90,7 @@ const BREATH_AMPLITUDE = 15;
 const ENTRY_GROUP_DELAY = 600;
 const DIVE_INTERVAL_BASE = 3000;
 const LOCK_DELAY_CAPTURE = 3000;
+const STAGE_INTRO_MS = 2000;
 
 // Scoring
 const SCORE = {
@@ -595,7 +596,7 @@ ctx.imageSmoothingEnabled = false;
 
 /* ============= SECTION 4: GAME STATE & RESET ============= */
 
-let phase = 'menu'; // menu, stageIntro, entering, playing, captured, challenge, challengeResult, dying, gameover, paused
+let phase = 'menu'; // menu, stageIntro, entering, playing, challenge, challengeResult, dying, gameover, paused
 let stageNum = 1;
 let livesRemaining = 3;
 let score = 0;
@@ -683,16 +684,9 @@ function resetGame() {
   challengeHits = 0;
   challengeTotal = 0;
   challengeEnemies = [];
-  stageIntroTimer = 2000;
+  stageIntroTimer = STAGE_INTRO_MS;
   deathTimer = 0;
   challengeResultTimer = 0;
-}
-
-function loadHighScore() {
-  try { return parseInt(localStorage.getItem('galaga_hs')) || 0; } catch { return 0; }
-}
-function saveHighScore(s) {
-  try { localStorage.setItem('galaga_hs', s); } catch {}
 }
 
 
@@ -1504,6 +1498,7 @@ function dropBomb(enemy) {
 function updateEnemyBombs(dt) {
   for (let i = enemyBombs.length - 1; i >= 0; i--) {
     const b = enemyBombs[i];
+    if (!b.active) { enemyBombs.splice(i, 1); continue; }   // consumed by a hit
     b.x += b.vx * dt / 1000;
     b.y += b.vy * dt / 1000;
     if (b.y > H + 10 || b.y < -10 || b.x < -10 || b.x > W + 10) {
@@ -2049,8 +2044,10 @@ function checkChallengeCollisions() {
 }
 
 function getChallengeBonus() {
+  // Per-hit points are already credited during play (see checkChallengeCollisions).
+  // The end-of-stage bonus is only the perfect-clear award.
   if (challengeHits === challengeTotal) return SCORE.CHALLENGE_PERFECT;
-  return challengeHits * SCORE.CHALLENGE_HIT;
+  return 0;
 }
 
 /* ============================================
@@ -2121,6 +2118,16 @@ function clearJustPressed() {
   for (const k in justPressed) justPressed[k] = false;
 }
 
+// Centralized return-to-menu: stop sustained audio, clear transient combat
+// state so nothing leaks across sessions (e.g. tractor-beam drone, rescue ship).
+function quitToMenu() {
+  stopTractorBeamSound();
+  tractorBeam = null;
+  _rescueShip = null;
+  enemyBombs = [];
+  phase = 'menu';
+}
+
 function processInput(dt) {
   switch (phase) {
     case 'menu':
@@ -2154,7 +2161,7 @@ function processInput(dt) {
       }
       // Quit to menu
       if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
-        phase = 'menu';
+        quitToMenu();
       }
       break;
 
@@ -2164,13 +2171,13 @@ function processInput(dt) {
       }
       // Quit from pause
       if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
-        phase = 'menu';
+        quitToMenu();
       }
       break;
 
     case 'gameover':
       if (justPressed['Space'] || justPressed['Enter'] || justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
-        phase = 'menu';
+        quitToMenu();
       }
       break;
   }
@@ -2325,7 +2332,7 @@ function update(dt) {
       if (allEnemiesDead()) {
         stageNum++;
         phase = 'stageIntro';
-        stageIntroTimer = 2500;
+        stageIntroTimer = STAGE_INTRO_MS;
         bullets = [];
         enemyBombs = [];
       }
@@ -2348,7 +2355,7 @@ function update(dt) {
         }
         stageNum++;
         phase = 'stageIntro';
-        stageIntroTimer = 2000;
+        stageIntroTimer = STAGE_INTRO_MS;
       }
       break;
 
@@ -2372,17 +2379,10 @@ function update(dt) {
           } else {
             stageNum++;
             phase = 'stageIntro';
-            stageIntroTimer = 2000;
+            stageIntroTimer = STAGE_INTRO_MS;
           }
         }
       }
-      break;
-
-    case 'captured':
-      updateFormation(dt);
-      updateTractorBeam(dt);
-      updateEnemyBombs(dt);
-      updateDivingEnemies(dt);
       break;
 
     case 'gameover':
@@ -2551,7 +2551,7 @@ function drawStageIntro() {
     ctx.restore();
   }
 
-  const readyAlpha = Math.max(0, 1 - (stageIntroTimer / 2500));
+  const readyAlpha = Math.max(0, 1 - (stageIntroTimer / STAGE_INTRO_MS));
   if (readyAlpha > 0) {
     ctx.globalAlpha = readyAlpha;
     ctx.save();
@@ -2606,10 +2606,10 @@ function drawPlayer() {
   if (player.invTimer > 0 && Math.floor(player.invTimer / 80) % 2 === 0) return;
 
   if (player.dualFighter) {
-    drawCachedSprite('player', player.x - 24 - 24, PLAYER_Y);
-    drawCachedSprite('player', player.x - 24 + 24, PLAYER_Y);
-  } else {
     drawCachedSprite('player', player.x - 24, PLAYER_Y);
+    drawCachedSprite('player', player.x + 24, PLAYER_Y);
+  } else {
+    drawCachedSprite('player', player.x, PLAYER_Y);
   }
 }
 
@@ -2631,6 +2631,7 @@ function drawEnemyBombsRender() {
   ctx.shadowBlur = 8;
   for (let i = 0; i < enemyBombs.length; i++) {
     const b = enemyBombs[i];
+    if (!b.active) continue;
     ctx.fillStyle = 'rgba(255,151,0,0.4)';
     ctx.beginPath();
     ctx.arc(b.x, b.y, CELL * 3, 0, Math.PI * 2);
@@ -2644,13 +2645,16 @@ function drawEnemyBombsRender() {
 }
 
 function drawTractorBeamRender() {
-  if (!tractorBeam || !tractorBeam.active) return;
+  if (!tractorBeam) return;
   if (tractorBeam.phase !== 'beaming' && tractorBeam.phase !== 'capturing') return;
 
-  const bx = tractorBeam.bossX + 24;
-  const by = tractorBeam.bossY + 48;
-  const beamH = tractorBeam.beamHeight || 200;
-  const beamW = tractorBeam.beamWidth || 80;
+  // Derive geometry from the boss enemy that owns the beam — match the fields
+  // set by startTractorBeamAttack (boss.x/y, beamWidth, maxBeamWidth, beamY).
+  const bx = tractorBeam.boss.x;
+  const by = tractorBeam.boss.y + 24;   // beam emanates from the boss underside
+  const beamW = Math.max(8, tractorBeam.beamWidth || 0);
+  // Beam reaches from the boss down to the player's altitude.
+  const beamH = Math.max(20, PLAYER_Y - by);
   const pulseAlpha = 0.3 + Math.sin(menuPulse * 8) * 0.15;
 
   ctx.save();
@@ -2696,8 +2700,8 @@ function drawTractorBeamRender() {
 }
 
 function drawRescueShipRender() {
-  if (!window._rescueShip || !window._rescueShip.active) return;
-  drawCachedSprite('player', window._rescueShip.x - 24, window._rescueShip.y);
+  if (!_rescueShip || !_rescueShip.active) return;
+  drawCachedSprite('player', _rescueShip.x, _rescueShip.y);
 }
 
 function drawHUD() {
@@ -2892,9 +2896,11 @@ function drawChallengeResults() {
     ctx.font = 'bold 22px monospace';
     ctx.fillText('BONUS: ' + SCORE.CHALLENGE_PERFECT.toLocaleString(), cx, cy + 70);
   } else {
+    // Per-hit points were credited live during the stage; only the perfect
+    // clear carries a stage-end bonus, so show the hits tally instead of "0".
     ctx.fillStyle = '#FFFFFF';
     ctx.font = 'bold 22px monospace';
-    ctx.fillText('BONUS: ' + getChallengeBonus().toLocaleString(), cx, cy + 40);
+    ctx.fillText('HITS: ' + challengeHits + ' x ' + SCORE.CHALLENGE_HIT, cx, cy + 40);
   }
 }
 
@@ -2958,12 +2964,7 @@ function render() {
 }
 
 /* ============================================
-   SECTION 15: EFFECTS SYSTEM
-   (merged into Sections 13 and 14)
-   ============================================ */
-
-/* ============================================
-   SECTION 16: GAME LOOP
+   SECTION 15: GAME LOOP
    ============================================ */
 function gameLoop(timestamp) {
   if (!lastTime) lastTime = timestamp;
