@@ -1483,7 +1483,7 @@ function updateDivingEnemies(dt) {
 
 function dropBomb(enemy) {
   const dx = player.x - enemy.x;
-  const dy = player.y - enemy.y;
+  const dy = PLAYER_Y - enemy.y;
   const dist = Math.hypot(dx, dy) || 1;
   const spread = 0.15;
   enemyBombs.push({
@@ -1552,10 +1552,10 @@ function updateTractorBeam(dt) {
 
       if (player.alive && !tb.capturedPlayer) {
         const dx = Math.abs(player.x - boss.x);
-        if (dx < tb.beamWidth / 2 && player.y > boss.y) {
+        if (dx < tb.beamWidth / 2 && PLAYER_Y > boss.y) {
           tb.capturedPlayer = true;
           tb.phase = 'capturing';
-          tb.captureY = player.y;
+          tb.captureY = PLAYER_Y;
           player.alive = false;
           playSound('capture');
         }
@@ -1626,7 +1626,7 @@ function updateRescueShip(dt) {
   _rescueShip.y += _rescueShip.vy * dt / 1000;
 
   // Player catches it
-  if (player.alive && Math.abs(player.x - _rescueShip.x) < 30 && Math.abs(player.y - _rescueShip.y) < 30) {
+  if (player.alive && Math.abs(player.x - _rescueShip.x) < 30 && Math.abs(PLAYER_Y - _rescueShip.y) < 30) {
     _rescueShip.active = false;
     _rescueShip = null;
     player.dualFighter = true;
