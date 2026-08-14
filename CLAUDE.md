@@ -13,6 +13,7 @@ No build system. Open `index.html` in a browser.
 
 ## Gotchas
 - Entire game is one `index.html` file with ~3000 lines of inline JS
+- `galaga.html` is a standalone copy of the game — after editing `index.html`, re-sync it (`cp index.html galaga.html`) or the copies drift
 - Sound effects synthesized procedurally via Web Audio (no audio files)
 - Sprites drawn programmatically as pixel art arrays (no image files)
 - 40 enemies with Bezier curve entry/dive paths and formation breathing
