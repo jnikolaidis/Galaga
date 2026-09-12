@@ -91,6 +91,7 @@ const ENTRY_GROUP_DELAY = 600;
 const DIVE_INTERVAL_BASE = 3000;
 const TRACTOR_BEAM_MS = 3000;   // how long the beam stays open before retracting
 const STAGE_INTRO_MS = 2000;
+const DEATH_ANIM_MS = 2000;     // player death animation before respawn/game over
 
 // Scoring
 const SCORE = {
@@ -591,6 +592,7 @@ let stageNum = 1;
 let livesRemaining = 3;
 let score = 0;
 let highScore = 0;
+let newHighScore = false;
 let shotsFired = 0;
 let shotsHit = 0;
 let extraLifeNext = EXTRA_LIFE_FIRST;
@@ -652,10 +654,11 @@ function resetGame() {
   stageNum = 1;
   livesRemaining = 3;
   score = 0;
+  newHighScore = false;
   shotsFired = 0;
   shotsHit = 0;
   extraLifeNext = EXTRA_LIFE_FIRST;
-  player = { x: W / 2, alive: true, dualFighter: false, invTimer: 0, fireTimer: 0 };
+  player = { x: W / 2, y: PLAYER_Y, alive: true, dualFighter: false, invTimer: 0, fireTimer: 0 };
   enemies = [];
   bullets = [];
   enemyBombs = [];
@@ -666,7 +669,8 @@ function resetGame() {
   entryGroupIndex = 0;
   entryTimer = 0;
   diveTimer = 0;
-  tractorBeam = null;
+  cancelTractorBeam();
+  _rescueShips.length = 0;
   challengeWaves = [];
   challengeWaveIndex = 0;
   challengeWaveTimer = 0;
@@ -690,11 +694,13 @@ function initAudio() {
   if (audioCtx) return;
   try {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   } catch (e) { /* silent fail */ }
 }
 
 function playSound(name) {
   if (!soundEnabled || !audioCtx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   const t = audioCtx.currentTime;
 
   if (name === 'fire') {
@@ -1187,8 +1193,8 @@ function initStage() {
 
   formation = { breathTimer: 0, offsetX: 0 };
   diveTimer = 0;
-  stopTractorBeamSound();   // an orphaned beam must not drone into the next stage
-  tractorBeam = null;
+  cancelTractorBeam();   // an orphaned beam must not drone into the next stage
+  _rescueShips.length = 0;
 
   buildEntryGroups();
   entryGroupIndex = 0;
@@ -1248,20 +1254,28 @@ function updateEntryQueue(dt) {
   }
 }
 
+// Shared path-follower: advance the enemy along its current path, mirror the
+// position onto it, and run the wing-flap loop. Rotation is left to the
+// caller — entering enemies pitch along the path, challenge enemies fly
+// unrotated.
+function followPath(enemy, speed, dt) {
+  advancePath(enemy.pathState, speed, dt);
+  enemy.x = enemy.pathState.x;
+  enemy.y = enemy.pathState.y;
+
+  enemy.animTimer += dt;
+  if (enemy.animTimer > 150) {
+    enemy.animTimer = 0;
+    enemy.animFrame = 1 - enemy.animFrame;
+  }
+}
+
 function updateEnteringEnemies(dt) {
   for (const enemy of enemies) {
     if (enemy.state !== 'entering') continue;
 
-    advancePath(enemy.pathState, ENTRY_SPEED, dt);
-    enemy.x = enemy.pathState.x;
-    enemy.y = enemy.pathState.y;
+    followPath(enemy, ENTRY_SPEED, dt);
     enemy.angle = enemy.pathState.angle - Math.PI / 2;
-
-    enemy.animTimer += dt;
-    if (enemy.animTimer > 150) {
-      enemy.animTimer = 0;
-      enemy.animFrame = 1 - enemy.animFrame;
-    }
 
     if (enemy.pathState.done) {
       enemy.state = 'formation';
@@ -1457,7 +1471,7 @@ function updateDivingEnemies(dt) {
 
 function dropBomb(enemy) {
   const dx = player.x - enemy.x;
-  const dy = PLAYER_Y - enemy.y;
+  const dy = player.y - enemy.y;
   const dist = Math.hypot(dx, dy) || 1;
   const spread = 0.15;
   enemyBombs.push({
@@ -1499,6 +1513,20 @@ function startTractorBeamAttack(boss) {
   };
 }
 
+// Single owner of tractor-beam teardown. Every path that must end a beam
+// (boss destroyed, player death, game over, stage reset, quit) goes through
+// here so the drone and the beam state can never leak.
+function cancelTractorBeam({ freePlayer = false } = {}) {
+  stopTractorBeamSound();
+  if (freePlayer && tractorBeam.phase === 'capturing') {
+    // Player was grabbed but the capture never completed. Shooting the boss
+    // in time frees the ship instead of costing a life.
+    player.alive = true;
+    player.invTimer = 2000;
+  }
+  tractorBeam = null;
+}
+
 function updateTractorBeam(dt) {
   if (!tractorBeam) return;
   const tb = tractorBeam;
@@ -1523,14 +1551,26 @@ function updateTractorBeam(dt) {
     case 'beaming':
       tb.beamWidth = Math.min(tb.maxBeamWidth, tb.beamWidth + dt * 0.15);
 
-      if (player.alive && !tb.capturedPlayer) {
+      if (player.alive && player.invTimer <= 0 && !tb.capturedPlayer) {
         const dx = Math.abs(player.x - boss.x);
-        if (dx < tb.beamWidth / 2 && PLAYER_Y > boss.y) {
-          tb.capturedPlayer = true;
-          tb.phase = 'capturing';
-          tb.captureY = PLAYER_Y;
-          player.alive = false;
-          playSound('capture');
+        if (dx < tb.beamWidth / 2 && player.y > boss.y) {
+          if (player.dualFighter) {
+            // Dual fighter caught in the beam loses one half — no life lost,
+            // no capture; the boss withdraws empty.
+            player.dualFighter = false;
+            player.invTimer = 2000;
+            spawnExplosion(player.x + 15, player.y);
+            playSound('playerDeath');
+            tb.phase = 'ascending';
+            tb.timer = 0;
+            stopTractorBeamSound();
+          } else {
+            tb.capturedPlayer = true;
+            tb.phase = 'capturing';
+            tb.captureY = player.y;
+            player.alive = false;
+            playSound('capture');
+          }
         }
       }
 
@@ -1550,14 +1590,8 @@ function updateTractorBeam(dt) {
         boss.pathState = null;
         stopTractorBeamSound();
 
-        livesRemaining--;
-        if (livesRemaining > 0) {
-          diedFrom = 'playing';
-          phase = 'dying';
-          deathTimer = 1500;
-        } else {
-          endGame();
-        }
+        // The capture costs a life through the shared death pipeline.
+        beginPlayerDeath('playing');
         tractorBeam = null;
       }
       break;
@@ -1576,18 +1610,18 @@ function updateTractorBeam(dt) {
   }
 }
 
-let _rescueShip = null;
+let _rescueShips = [];
 
 function releaseCapturedShip(boss) {
   if (!boss.capturedShip) return;
   boss.capturedShip = false;
 
-  _rescueShip = {
+  _rescueShips.push({
     x: boss.x,
     y: boss.y - 24,
     vy: 80,
     active: true,
-  };
+  });
 
   playSound('rescue');
   score += SCORE.CAPTURE_RESCUE;
@@ -1595,23 +1629,23 @@ function releaseCapturedShip(boss) {
 }
 
 function updateRescueShip(dt) {
-  if (!_rescueShip || !_rescueShip.active) return;
+  for (let i = _rescueShips.length - 1; i >= 0; i--) {
+    const ship = _rescueShips[i];
 
-  _rescueShip.y += _rescueShip.vy * dt / 1000;
+    ship.y += ship.vy * dt / 1000;
 
-  // Player catches it
-  if (player.alive && Math.abs(player.x - _rescueShip.x) < 30 && Math.abs(PLAYER_Y - _rescueShip.y) < 30) {
-    _rescueShip.active = false;
-    _rescueShip = null;
-    player.dualFighter = true;
-    playSound('rescue');
-    return;
-  }
+    // Player catches it
+    if (player.alive && Math.abs(player.x - ship.x) < 30 && Math.abs(player.y - ship.y) < 30) {
+      _rescueShips.splice(i, 1);
+      player.dualFighter = true;
+      playSound('rescue');
+      continue;
+    }
 
-  // Falls off screen
-  if (_rescueShip.y > H + 30) {
-    _rescueShip.active = false;
-    _rescueShip = null;
+    // Falls off screen
+    if (ship.y > H + 30) {
+      _rescueShips.splice(i, 1);
+    }
   }
 }
 
@@ -1627,6 +1661,7 @@ function updatePlayer(dt) {
   let dx = 0;
   if (moveDir !== 0) dx = moveDir * PLAYER_SPEED;
   if (touchMoveX !== 0) dx = touchMoveX * PLAYER_SPEED;
+  touchMoveX = 0;   // consume-and-clear: each touchmove event re-sets it
 
   player.x += dx * dt / 1000;
 
@@ -1649,11 +1684,11 @@ function firePlayerBullet() {
   player.fireTimer = 120;
 
   if (player.dualFighter) {
-    bullets.push({ x: player.x - 12, y: PLAYER_Y - 10, active: true });
-    bullets.push({ x: player.x + 12, y: PLAYER_Y - 10, active: true });
+    bullets.push({ x: player.x - 12, y: player.y - 10, active: true });
+    bullets.push({ x: player.x + 12, y: player.y - 10, active: true });
     shotsFired += 2;
   } else {
-    bullets.push({ x: player.x, y: PLAYER_Y - 10, active: true });
+    bullets.push({ x: player.x, y: player.y - 10, active: true });
     shotsFired++;
   }
   playSound('fire');
@@ -1672,26 +1707,56 @@ function aabb(x1, y1, w1, h1, x2, y2, w2, h2) {
   return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
 }
 
-function checkCollisions() {
-  const spriteHalf = 20;
+// Enemy hitbox half-extent — shared by all bullet/body collision geometry
+const spriteHalf = 20;
 
-  // Player bullets vs enemies
+// Player bullets vs a list of enemies. `canBeShot` picks the valid targets;
+// `onHit` owns scoring and dead-marking for that stage type.
+function checkBulletHits(list, canBeShot, onHit) {
   for (let bi = bullets.length - 1; bi >= 0; bi--) {
     const b = bullets[bi];
     if (!b.active) continue;
 
-    for (const enemy of enemies) {
-      if (enemy.state === 'dead' || enemy.state === 'waiting') continue;
+    for (const enemy of list) {
+      if (!canBeShot(enemy)) continue;
 
       if (aabb(b.x - 2, b.y - 4, 4, 8,
                enemy.x - spriteHalf, enemy.y - spriteHalf, spriteHalf * 2, spriteHalf * 2)) {
         b.active = false;
         shotsHit++;
-        hitEnemy(enemy);
+        onHit(enemy);
         break;
       }
     }
   }
+}
+
+// Enemy bodies vs the player. `canHitPlayer` picks the colliding states; the
+// colliding enemy is killed outright and killPlayer() owns the rest.
+function checkBodyHits(list, canHitPlayer) {
+  if (player.alive && player.invTimer <= 0) {
+    for (const enemy of list) {
+      if (!canHitPlayer(enemy)) continue;
+
+      const pw = player.dualFighter ? 30 : 20;
+      if (aabb(enemy.x - spriteHalf, enemy.y - spriteHalf, spriteHalf * 2, spriteHalf * 2,
+               player.x - pw, player.y - 20, pw * 2, 40)) {
+        enemy.state = 'dead';
+        enemy.alive = false;
+        killPlayer();
+        break;
+      }
+    }
+  }
+}
+
+function checkCollisions() {
+  // Player bullets vs enemies
+  checkBulletHits(
+    enemies,
+    e => e.state !== 'dead' && e.state !== 'waiting',
+    hitEnemy
+  );
 
   // Enemy bombs vs player
   if (player.alive && player.invTimer <= 0) {
@@ -1701,7 +1766,7 @@ function checkCollisions() {
 
       const pw = player.dualFighter ? 30 : 20;
       if (aabb(b.x - 4, b.y - 4, 8, 8,
-               player.x - pw, PLAYER_Y - 20, pw * 2, 40)) {
+               player.x - pw, player.y - 20, pw * 2, 40)) {
         b.active = false;
         killPlayer();
         break;
@@ -1710,21 +1775,10 @@ function checkCollisions() {
   }
 
   // Diving enemies vs player (body collision)
-  if (player.alive && player.invTimer <= 0) {
-    for (const enemy of enemies) {
-      if (enemy.state !== 'diving' && enemy.state !== 'entering') continue;
-
-      const pw = player.dualFighter ? 30 : 20;
-      if (aabb(enemy.x - spriteHalf, enemy.y - spriteHalf, spriteHalf * 2, spriteHalf * 2,
-               player.x - pw, PLAYER_Y - 20, pw * 2, 40)) {
-        enemy.state = 'dead';
-        enemy.alive = false;
-        enemy.hp = 0;
-        killPlayer();
-        break;
-      }
-    }
-  }
+  checkBodyHits(
+    enemies,
+    e => e.state === 'diving' || e.state === 'entering'
+  );
 }
 
 function hitEnemy(enemy) {
@@ -1751,7 +1805,10 @@ function destroyEnemy(enemy) {
     if (wasState === 'formation') {
       pts = SCORE.BOSS_FORM;
     } else {
-      const escorts = enemy.escortIds.length;
+      const escorts = enemy.escortIds.filter(id => {
+        const esc = enemies[id];
+        return esc && esc.alive && esc.state === 'diving';
+      }).length;
       pts = escorts >= 2 ? SCORE.BOSS_DIVE_2 : escorts >= 1 ? SCORE.BOSS_DIVE_1 : SCORE.BOSS_DIVE_0;
     }
   }
@@ -1776,15 +1833,21 @@ function destroyEnemy(enemy) {
   // Destroying the beam owner cancels its beam — otherwise a dead boss's beam
   // keeps rendering, keeps droning, and can still capture the player.
   if (tractorBeam && tractorBeam.boss === enemy) {
-    const midAbduction = tractorBeam.phase === 'capturing';
-    stopTractorBeamSound();
-    tractorBeam = null;
-    if (midAbduction) {
-      // Player was grabbed but the capture never completed. Shooting the boss
-      // in time frees the ship instead of costing a life.
-      player.alive = true;
-      player.invTimer = 2000;
-    }
+    cancelTractorBeam({ freePlayer: tractorBeam.phase === 'capturing' });
+  }
+}
+
+// Single lose-a-life pipeline: decrement lives, then either run the shared
+// death animation or end the game. fromPhase records where the death happened
+// so the 'dying' handler resumes the right phase afterwards.
+function beginPlayerDeath(fromPhase) {
+  livesRemaining--;
+  if (livesRemaining > 0) {
+    diedFrom = fromPhase;
+    phase = 'dying';
+    deathTimer = DEATH_ANIM_MS;
+  } else {
+    endGame();
   }
 }
 
@@ -1797,22 +1860,18 @@ function killPlayer() {
     player.dualFighter = false;
     player.alive = true;
     player.invTimer = 2000;
-    spawnExplosion(player.x + 15, PLAYER_Y);
+    spawnExplosion(player.x + 15, player.y);
     playSound('playerDeath');
     return;
   }
 
-  spawnExplosion(player.x, PLAYER_Y);
+  // An open beam must not drone through the death animation
+  if (tractorBeam) cancelTractorBeam();
+
+  spawnExplosion(player.x, player.y);
   playSound('playerDeath');
 
-  livesRemaining--;
-  if (livesRemaining > 0) {
-    diedFrom = phase;
-    phase = 'dying';
-    deathTimer = 2000;
-  } else {
-    endGame();
-  }
+  beginPlayerDeath(phase);
 }
 
 function respawnPlayer() {
@@ -1841,7 +1900,9 @@ function saveHighScore() {
 // Single game-over path: every route to 'gameover' must record the high score.
 function endGame() {
   phase = 'gameover';
+  if (tractorBeam) cancelTractorBeam();
   if (score > highScore) {
+    newHighScore = true;
     highScore = score;
     saveHighScore();
   }
@@ -1922,18 +1983,14 @@ function initChallengeStage() {
       const exitX = W / 2 + (i - 3.5) * 60;
       const exitY = H + 60;
 
-      wave.push({
-        type: waveTypes[w],
-        delay: i * 120,
-        x: -50, y: -50,
-        state: 'waiting',
-        alive: true,
-        pathState: null,
-        path: pathFn(exitX, exitY),
-        animFrame: 0,
-        animTimer: 0,
-        hp: 1,
-      });
+      // One enemy shape from the shared factory — hp is moot here because
+      // challenge kills are one-shot. Only the launch fields differ.
+      const enemy = createEnemy(waveTypes[w]);
+      enemy.x = -50;
+      enemy.y = -50;
+      enemy.delay = i * 120;
+      enemy.path = pathFn(exitX, exitY);
+      wave.push(enemy);
     }
     challengeWaves.push(wave);
   }
@@ -1944,15 +2001,8 @@ function updateChallengeStage(dt) {
   for (const enemy of challengeEnemies) {
     if (enemy.state !== 'flying') continue;
 
-    advancePath(enemy.pathState, ENTRY_SPEED * 0.8, dt);
-    enemy.x = enemy.pathState.x;
-    enemy.y = enemy.pathState.y;
-
-    enemy.animTimer += dt;
-    if (enemy.animTimer > 150) {
-      enemy.animTimer = 0;
-      enemy.animFrame = 1 - enemy.animFrame;
-    }
+    // No angle sync here — challenge enemies fly through unrotated.
+    followPath(enemy, ENTRY_SPEED * 0.8, dt);
 
     if (enemy.pathState.done || enemy.y > H + 40 || enemy.x < -40 || enemy.x > W + 40) {
       enemy.state = 'exited';
@@ -1990,52 +2040,34 @@ function updateChallengeStage(dt) {
   }
 }
 
+// Challenge kills are one-shot: flat CHALLENGE_HIT score, counted toward the
+// perfect-clear tally. hp plays no part — even a boss dies to a single hit.
+function killChallengeEnemy(enemy) {
+  enemy.state = 'dead';
+  enemy.alive = false;
+  challengeHits++;
+
+  const pts = SCORE.CHALLENGE_HIT;
+  score += pts;
+  spawnExplosion(enemy.x, enemy.y);
+  spawnScorePop(pts, enemy.x, enemy.y);
+  playSound('enemyHit');
+  checkExtraLife();
+}
+
 function checkChallengeCollisions() {
-  const spriteHalf = 20;
-
   // Player bullets vs challenge enemies
-  for (let bi = bullets.length - 1; bi >= 0; bi--) {
-    const b = bullets[bi];
-    if (!b.active) continue;
-
-    for (const enemy of challengeEnemies) {
-      if (enemy.state !== 'flying') continue;
-
-      if (aabb(b.x - 2, b.y - 4, 4, 8, enemy.x - 20, enemy.y - 20, 40, 40)) {
-        b.active = false;
-        shotsHit++;
-        enemy.state = 'dead';
-        enemy.alive = false;
-        enemy.hp = 0;
-        challengeHits++;
-
-        const pts = SCORE.CHALLENGE_HIT;
-        score += pts;
-        spawnExplosion(enemy.x, enemy.y);
-        spawnScorePop(pts, enemy.x, enemy.y);
-        playSound('enemyHit');
-        checkExtraLife();
-        break;
-      }
-    }
-  }
+  checkBulletHits(
+    challengeEnemies,
+    e => e.state === 'flying',
+    killChallengeEnemy
+  );
 
   // Flying challenge enemies vs player (body collision)
-  if (player.alive && player.invTimer <= 0) {
-    for (const enemy of challengeEnemies) {
-      if (enemy.state !== 'flying') continue;
-
-      const pw = player.dualFighter ? 30 : 20;
-      if (aabb(enemy.x - spriteHalf, enemy.y - spriteHalf, spriteHalf * 2, spriteHalf * 2,
-               player.x - pw, PLAYER_Y - 20, pw * 2, 40)) {
-        enemy.state = 'dead';
-        enemy.alive = false;
-        enemy.hp = 0;
-        killPlayer();
-        break;
-      }
-    }
-  }
+  checkBodyHits(
+    challengeEnemies,
+    e => e.state === 'flying'
+  );
 }
 
 function getChallengeBonus() {
@@ -2055,6 +2087,7 @@ let touchStartX = 0;
 let autoFire = false;
 
 document.addEventListener('keydown', (e) => {
+  initAudio();   // keydown is a real user gesture — Safari needs the context resumed here
   // Don't intercept browser shortcuts (Cmd/Ctrl/Alt + key)
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space','KeyP','KeyQ','Escape','KeyZ','KeyX','Enter'].includes(e.code)) {
@@ -2072,6 +2105,9 @@ document.addEventListener('keyup', (e) => {
 window.addEventListener('blur', () => {
   for (const k in keys) keys[k] = false;
   for (const k in justPressed) justPressed[k] = false;
+  touchActive = false;
+  touchMoveX = 0;
+  autoFire = false;
 });
 
 canvas.addEventListener('touchstart', (e) => {
@@ -2095,11 +2131,18 @@ canvas.addEventListener('touchmove', (e) => {
   touchStartX = touch.clientX;
 
   const canvasRect = canvas.getBoundingClientRect();
-  const scaleRatio = W / canvasRect.width;
+  const scaleRatio = canvasRect.width > 0 ? W / canvasRect.width : 1;
   touchMoveX = Math.max(-1, Math.min(1, dx * scaleRatio * TOUCH_SENSITIVITY / PLAYER_SPEED * 60));
 }, { passive: false });
 
 canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  touchActive = false;
+  touchMoveX = 0;
+  autoFire = false;
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', (e) => {
   e.preventDefault();
   touchActive = false;
   touchMoveX = 0;
@@ -2115,9 +2158,8 @@ function clearJustPressed() {
 // Centralized return-to-menu: stop sustained audio, clear transient combat
 // state so nothing leaks across sessions (e.g. tractor-beam drone, rescue ship).
 function quitToMenu() {
-  stopTractorBeamSound();
-  tractorBeam = null;
-  _rescueShip = null;
+  cancelTractorBeam();
+  _rescueShips = [];
   enemyBombs = [];
   phase = 'menu';
 }
@@ -2150,6 +2192,7 @@ function processInput(dt) {
 
       // Pause
       if (justPressed['KeyP']) {
+        if (tractorBeam) stopTractorBeamSound();   // pause the drone with the game
         pausedFrom = phase;
         phase = 'paused';
       }
@@ -2161,6 +2204,7 @@ function processInput(dt) {
 
     case 'paused':
       if (justPressed['KeyP'] || justPressed['Space']) {
+        if (tractorBeam && (tractorBeam.phase === 'beaming' || tractorBeam.phase === 'capturing')) startTractorBeamSound();   // resume the drone
         phase = pausedFrom;
       }
       // Quit from pause
@@ -2330,6 +2374,7 @@ function update(dt) {
 
     case 'playing':
       updateFormation(dt);
+      updateEntryQueue(dt);   // finish launching pending entry waves after a death-resume into 'playing'
       updateEnteringEnemies(dt);
       updatePlayer(dt);
       updateBullets(dt);
@@ -2339,12 +2384,13 @@ function update(dt) {
       updateTractorBeam(dt);
       updateRescueShip(dt);
       checkCollisions();
-      if (allEnemiesDead()) {
+      if (phase === 'playing' && allEnemiesDead()) {
         stageNum++;
         phase = 'stageIntro';
         stageIntroTimer = STAGE_INTRO_MS;
         bullets = [];
         enemyBombs = [];
+        _rescueShips.length = 0;
       }
       break;
 
@@ -2377,11 +2423,7 @@ function update(dt) {
             // skipped or counted as cleared.
             phase = 'challenge';
           } else if (enemies.length > 0 && !allEnemiesDead()) {
-            if (enemies.some(e => e.state === 'entering' || e.state === 'waiting')) {
-              phase = 'entering';
-            } else {
-              phase = 'playing';
-            }
+            phase = 'playing';
           } else {
             stageNum++;
             phase = 'stageIntro';
@@ -2603,10 +2645,10 @@ function drawPlayer() {
   if (player.invTimer > 0 && Math.floor(player.invTimer / 80) % 2 === 0) return;
 
   if (player.dualFighter) {
-    drawCachedSprite('player', player.x - 24, PLAYER_Y);
-    drawCachedSprite('player', player.x + 24, PLAYER_Y);
+    drawCachedSprite('player', player.x - 24, player.y);
+    drawCachedSprite('player', player.x + 24, player.y);
   } else {
-    drawCachedSprite('player', player.x, PLAYER_Y);
+    drawCachedSprite('player', player.x, player.y);
   }
 }
 
@@ -2651,7 +2693,7 @@ function drawTractorBeamRender() {
   const by = tractorBeam.boss.y + 24;   // beam emanates from the boss underside
   const beamW = Math.max(8, tractorBeam.beamWidth || 0);
   // Beam reaches from the boss down to the player's altitude.
-  const beamH = Math.max(20, PLAYER_Y - by);
+  const beamH = Math.max(20, player.y - by);
   const pulseAlpha = 0.3 + Math.sin(menuPulse * 8) * 0.15;
 
   ctx.save();
@@ -2703,8 +2745,9 @@ function drawTractorBeamRender() {
 }
 
 function drawRescueShipRender() {
-  if (!_rescueShip || !_rescueShip.active) return;
-  drawCachedSprite('player', _rescueShip.x, _rescueShip.y);
+  for (const ship of _rescueShips) {
+    drawCachedSprite('player', ship.x, ship.y);
+  }
 }
 
 function drawHUD() {
@@ -2750,7 +2793,7 @@ function drawParticles() {
     if (p.type === 'explosion') {
       const frameName = 'explosion' + p.frame;
       if (spriteCache[frameName]) {
-        drawCachedSprite(frameName, p.x - 24, p.y - 24);
+        drawCachedSprite(frameName, p.x, p.y);
       } else {
         const progress = p.frame / p.totalFrames;
         const radius = 10 + progress * 30;
@@ -2850,7 +2893,7 @@ function drawGameOverScreen() {
   ctx.font = 'bold 18px monospace';
   ctx.fillText('SCORE: ' + score.toLocaleString(), cx, cy + 95);
 
-  if (score >= highScore && score > 0) {
+  if (newHighScore) {
     ctx.save();
     ctx.shadowColor = '#FFFF00';
     ctx.shadowBlur = 12;
