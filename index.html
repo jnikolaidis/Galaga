@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Galaga</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -13,7 +13,6 @@
     align-items: center;
     min-height: 100vh;
     overflow: hidden;
-    touch-action: none;
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;
@@ -22,6 +21,7 @@
     display: block;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
+    touch-action: none;
   }
   #wrapper {
     position: relative;
@@ -47,9 +47,14 @@
 </head>
 <body>
 <div id="wrapper">
-  <canvas id="game"></canvas>
-  <button id="sound-btn" onclick="toggleSound()">SOUND: OFF</button>
+  <canvas id="game" role="img" aria-label="Galaga game screen: your fighter at the bottom, enemy formation above"></canvas>
+  <button id="sound-btn" type="button" aria-pressed="false" onclick="toggleSound()">SOUND: OFF</button>
 </div>
+<noscript>
+  <p style="color:#fff;font:16px monospace;text-align:center;padding:24px">
+    Galaga needs JavaScript enabled to run.
+  </p>
+</noscript>
 <script>
 /* ============= SECTION 1: CONSTANTS & CONFIGURATION ============= */
 
@@ -68,6 +73,8 @@ const PLAYER_SPEED = 360;     // px/s horizontal movement
 const PLAYER_Y = H - 40;      // fixed Y position near bottom
 const MAX_BULLETS = 2;
 const BULLET_SPEED = 600;     // px/s upward
+const PLAYER_HALF_W = 24;     // single-fighter half-width for movement clamping
+const DUAL_HALF_W = 30;       // dual-fighter half-width for movement clamping
 
 // Formation grid — slot layout for enemies in idle position
 const FORM_COLS = 10;
@@ -82,6 +89,11 @@ const ENEMY_BOMB_SPEED = 300;
 const DIVE_SPEED_BASE = 350;
 const ENTRY_SPEED = 400;
 
+// Tractor beam
+const BEAM_DESCENT_SPEED = 200;   // px/s the beam-owning boss descends
+const BEAM_WIDTH_RATE = 0.15;     // px of beam width gained per ms
+const BEAM_RISE_RATE = 0.2;       // px/ms — capture pull-up and boss drift back
+
 // Formation breathing — idle sway animation
 const BREATH_SPEED = 0.001;
 const BREATH_AMPLITUDE = 15;
@@ -92,6 +104,9 @@ const DIVE_INTERVAL_BASE = 3000;
 const TRACTOR_BEAM_MS = 3000;   // how long the beam stays open before retracting
 const STAGE_INTRO_MS = 2000;
 const DEATH_ANIM_MS = 2000;     // player death animation before respawn/game over
+const PLAYER_INVULN_MS = 2000;  // post-respawn invulnerability window
+const FIRE_COOLDOWN_MS = 120;   // minimum gap between player shots
+const CHALLENGE_WAVE_MS = 2000; // delay between challenge-stage waves
 
 // Scoring
 const SCORE = {
@@ -698,6 +713,47 @@ function initAudio() {
   } catch (e) { /* silent fail */ }
 }
 
+// One oscillator with a short decay envelope — the building block for the cue
+// sounds below. `t` is an absolute AudioContext time and `offset` shifts it.
+function playBlip(t, freq, offset, dur, type = 'square', gain = 0.10) {
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  g.gain.setValueAtTime(gain, t + offset);
+  g.gain.linearRampToValueAtTime(0, t + offset + dur);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(t + offset);
+  osc.stop(t + offset + dur);
+}
+
+// Sequential notes; pass durs as a number for even spacing or an array to vary it.
+function playSequence(t, notes, durs, type = 'square', gain = 0.10) {
+  let offset = 0;
+  for (let i = 0; i < notes.length; i++) {
+    const d = typeof durs === 'number' ? durs : durs[i];
+    playBlip(t, notes[i], offset, d, type, gain);
+    offset += d;
+  }
+}
+
+// All notes struck together.
+function playChord(t, notes, dur, type = 'square', gain = 0.10) {
+  for (const n of notes) playBlip(t, n, 0, dur, type, gain);
+}
+
+// The "noise" layers in these cues are fixed high-frequency square waves.
+function playHiss(t, freq, dur, gain) {
+  const n = audioCtx.createOscillator();
+  const ng = audioCtx.createGain();
+  n.type = 'square';
+  n.frequency.value = freq;
+  ng.gain.setValueAtTime(gain, t);
+  ng.gain.linearRampToValueAtTime(0, t + dur);
+  n.connect(ng).connect(audioCtx.destination);
+  n.start(t); n.stop(t + dur);
+}
+
 function playSound(name) {
   if (!soundEnabled || !audioCtx) return;
   if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
@@ -705,14 +761,7 @@ function playSound(name) {
 
   if (name === 'fire') {
     // Short high-frequency square wave blip
-    const osc = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    osc.type = 'square';
-    osc.frequency.value = 1200;
-    g.gain.setValueAtTime(0.10, t);
-    g.gain.linearRampToValueAtTime(0, t + 0.04);
-    osc.connect(g).connect(audioCtx.destination);
-    osc.start(t); osc.stop(t + 0.04);
+    playBlip(t, 1200, 0, 0.04, 'square', 0.10);
   }
   else if (name === 'enemyHit') {
     // Noise burst + descending tone
@@ -725,43 +774,15 @@ function playSound(name) {
     g.gain.linearRampToValueAtTime(0, t + 0.08);
     osc.connect(g).connect(audioCtx.destination);
     osc.start(t); osc.stop(t + 0.08);
-    // Noise component via high-freq oscillator
-    const n = audioCtx.createOscillator();
-    const ng = audioCtx.createGain();
-    n.type = 'square';
-    n.frequency.value = 3500;
-    ng.gain.setValueAtTime(0.06, t);
-    ng.gain.linearRampToValueAtTime(0, t + 0.05);
-    n.connect(ng).connect(audioCtx.destination);
-    n.start(t); n.stop(t + 0.05);
+    playHiss(t, 3500, 0.05, 0.06);
   }
   else if (name === 'bossHit') {
     // Deeper thud
-    const osc = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.value = 180;
-    g.gain.setValueAtTime(0.12, t);
-    g.gain.linearRampToValueAtTime(0, t + 0.10);
-    osc.connect(g).connect(audioCtx.destination);
-    osc.start(t); osc.stop(t + 0.10);
+    playBlip(t, 180, 0, 0.10, 'triangle', 0.12);
   }
   else if (name === 'bossDestroy') {
     // Multi-note descending
-    const notes = [440, 220, 110];
-    const dur = [0.06, 0.06, 0.08];
-    let offset = 0;
-    for (let i = 0; i < 3; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.10, t + offset);
-      g.gain.linearRampToValueAtTime(0, t + offset + dur[i]);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t + offset); osc.stop(t + offset + dur[i]);
-      offset += dur[i];
-    }
+    playSequence(t, [440, 220, 110], [0.06, 0.06, 0.08], 'square', 0.10);
   }
   else if (name === 'playerDeath') {
     // Long descending sweep with noise
@@ -775,95 +796,27 @@ function playSound(name) {
     g.gain.linearRampToValueAtTime(0, t + 0.4);
     osc.connect(g).connect(audioCtx.destination);
     osc.start(t); osc.stop(t + 0.4);
-    // Noise layer
-    const n = audioCtx.createOscillator();
-    const ng = audioCtx.createGain();
-    n.type = 'square';
-    n.frequency.value = 2800;
-    ng.gain.setValueAtTime(0.05, t);
-    ng.gain.linearRampToValueAtTime(0, t + 0.35);
-    n.connect(ng).connect(audioCtx.destination);
-    n.start(t); n.stop(t + 0.35);
+    playHiss(t, 2800, 0.35, 0.05);
   }
   else if (name === 'capture') {
     // Descending arpeggio E5→B4→G4
-    const notes = [659, 494, 392];
-    const dur = [0.10, 0.10, 0.10];
-    let offset = 0;
-    for (let i = 0; i < 3; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.08, t + offset);
-      g.gain.linearRampToValueAtTime(0, t + offset + dur[i]);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t + offset); osc.stop(t + offset + dur[i]);
-      offset += dur[i];
-    }
+    playSequence(t, [659, 494, 392], 0.10, 'square', 0.08);
   }
   else if (name === 'rescue') {
     // Ascending arpeggio C4→E4→G4→C5
-    const notes = [262, 330, 392, 523];
-    const dur = [0.08, 0.08, 0.08, 0.16];
-    let offset = 0;
-    for (let i = 0; i < 4; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.09, t + offset);
-      g.gain.linearRampToValueAtTime(0, t + offset + dur[i]);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t + offset); osc.stop(t + offset + dur[i]);
-      offset += dur[i];
-    }
+    playSequence(t, [262, 330, 392, 523], [0.08, 0.08, 0.08, 0.16], 'square', 0.09);
   }
   else if (name === 'stageStart') {
     // 4-note ascending melody E4→G4→B4→E5
-    const notes = [330, 392, 494, 659];
-    const dur = [0.08, 0.08, 0.08, 0.12];
-    let offset = 0;
-    for (let i = 0; i < 4; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.09, t + offset);
-      g.gain.linearRampToValueAtTime(0, t + offset + dur[i]);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t + offset); osc.stop(t + offset + dur[i]);
-      offset += dur[i];
-    }
+    playSequence(t, [330, 392, 494, 659], [0.08, 0.08, 0.08, 0.12], 'square', 0.09);
   }
   else if (name === 'challengeStart') {
     // Faster ascending scale C5→D5→E5→F5→G5
-    const notes = [523, 587, 659, 698, 784];
-    const dur = 0.06;
-    for (let i = 0; i < 5; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.08, t + i * dur);
-      g.gain.linearRampToValueAtTime(0, t + i * dur + dur);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t + i * dur); osc.stop(t + i * dur + dur);
-    }
+    playSequence(t, [523, 587, 659, 698, 784], 0.06, 'square', 0.08);
   }
   else if (name === 'extraLife') {
     // Bright 3-note chord C5, E5, G5 simultaneously
-    const notes = [523, 659, 784];
-    for (let i = 0; i < 3; i++) {
-      const osc = audioCtx.createOscillator();
-      const g = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.value = notes[i];
-      g.gain.setValueAtTime(0.07, t);
-      g.gain.linearRampToValueAtTime(0, t + 0.20);
-      osc.connect(g).connect(audioCtx.destination);
-      osc.start(t); osc.stop(t + 0.20);
-    }
+    playChord(t, [523, 659, 784], 0.20, 'square', 0.07);
   }
 }
 
@@ -1151,7 +1104,7 @@ function createTractorBeamPath(startX, startY) {
    SECTION 7: ENEMY SYSTEM & FORMATION
    ============================================ */
 function getFormationPos(row, col) {
-  const totalWidth = 9 * FORM_SPACING_X;
+  const totalWidth = (FORM_COLS - 1) * FORM_SPACING_X;
   const startX = FORM_CENTER_X - totalWidth / 2;
   const x = startX + col * FORM_SPACING_X + (formation ? formation.offsetX : 0);
   const y = FORM_TOP_Y + row * FORM_SPACING_Y;
@@ -1187,9 +1140,9 @@ function initStage() {
   // Row 1-2: 8 butterflies each at cols 1-8
   for (let r = 1; r <= 2; r++)
     for (let c = 1; c <= 8; c++) enemies.push(createEnemy('butterfly', r, c));
-  // Row 3-4: 10 bees each at cols 0-9
-  for (let r = 3; r <= 4; r++)
-    for (let c = 0; c <= 9; c++) enemies.push(createEnemy('bee', r, c));
+  // Remaining rows: bees across the full grid width
+  for (let r = 3; r < FORM_ROWS; r++)
+    for (let c = 0; c < FORM_COLS; c++) enemies.push(createEnemy('bee', r, c));
 
   formation = { breathTimer: 0, offsetX: 0 };
   diveTimer = 0;
@@ -1507,7 +1460,6 @@ function startTractorBeamAttack(boss) {
     timer: 0,
     beamWidth: 0,
     maxBeamWidth: 80,
-    beamY: 0,
     capturedPlayer: false,
     captureY: 0,
   };
@@ -1518,12 +1470,27 @@ function startTractorBeamAttack(boss) {
 // here so the drone and the beam state can never leak.
 function cancelTractorBeam({ freePlayer = false } = {}) {
   stopTractorBeamSound();
-  if (freePlayer && tractorBeam.phase === 'capturing') {
+  const tb = tractorBeam;
+  if (!tb) return;
+
+  if (freePlayer && tb.phase === 'capturing') {
     // Player was grabbed but the capture never completed. Shooting the boss
     // in time frees the ship instead of costing a life.
     player.alive = true;
-    player.invTimer = 2000;
+    player.invTimer = PLAYER_INVULN_MS;
   }
+
+  // Nothing else moves an enemy in 'capturing' — updateFormation and
+  // updateDivingEnemies both skip it — so a cancelled beam must hand its boss
+  // back to the formation or it hangs mid-air and blocks the stage clear.
+  // (A boss killed outright is already 'dead' and is left untouched.)
+  const boss = tb.boss;
+  if (boss && boss.state === 'capturing') {
+    boss.state = 'formation';
+    boss.angle = 0;
+    boss.pathState = null;
+  }
+
   tractorBeam = null;
 }
 
@@ -1536,20 +1503,19 @@ function updateTractorBeam(dt) {
 
   switch (tb.phase) {
     case 'descending':
-      advancePath(boss.pathState, 200, dt);
+      advancePath(boss.pathState, BEAM_DESCENT_SPEED, dt);
       boss.x = boss.pathState.x;
       boss.y = boss.pathState.y;
 
       if (boss.pathState.done) {
         tb.phase = 'beaming';
         tb.timer = 0;
-        tb.beamY = boss.y + 24;
         startTractorBeamSound();
       }
       break;
 
     case 'beaming':
-      tb.beamWidth = Math.min(tb.maxBeamWidth, tb.beamWidth + dt * 0.15);
+      tb.beamWidth = Math.min(tb.maxBeamWidth, tb.beamWidth + dt * BEAM_WIDTH_RATE);
 
       if (player.alive && player.invTimer <= 0 && !tb.capturedPlayer) {
         const dx = Math.abs(player.x - boss.x);
@@ -1558,7 +1524,7 @@ function updateTractorBeam(dt) {
             // Dual fighter caught in the beam loses one half — no life lost,
             // no capture; the boss withdraws empty.
             player.dualFighter = false;
-            player.invTimer = 2000;
+            player.invTimer = PLAYER_INVULN_MS;
             spawnExplosion(player.x + 15, player.y);
             playSound('playerDeath');
             tb.phase = 'ascending';
@@ -1582,7 +1548,7 @@ function updateTractorBeam(dt) {
       break;
 
     case 'capturing':
-      tb.captureY -= dt * 0.2;
+      tb.captureY -= dt * BEAM_RISE_RATE;
       if (tb.captureY <= boss.y + 24) {
         boss.capturedShip = true;
         boss.state = 'formation';
@@ -1597,7 +1563,7 @@ function updateTractorBeam(dt) {
       break;
 
     case 'ascending':
-      boss.y -= dt * 0.2;
+      boss.y -= dt * BEAM_RISE_RATE;
       const targetPos = getFormationPos(boss.row, boss.col);
       if (boss.y <= targetPos.y) {
         boss.y = targetPos.y;
@@ -1626,6 +1592,7 @@ function releaseCapturedShip(boss) {
   playSound('rescue');
   score += SCORE.CAPTURE_RESCUE;
   spawnScorePop(SCORE.CAPTURE_RESCUE, boss.x, boss.y);
+  checkExtraLife();
 }
 
 function updateRescueShip(dt) {
@@ -1653,20 +1620,27 @@ function updateRescueShip(dt) {
    SECTION 9: PLAYER & COLLISION
    ============================================ */
 let moveDir = 0;
-let touchMoveX = 0;
+// Touch drag is position-based, not velocity-based, so it stays frame-rate
+// independent: touchmove records where the ship should be and updatePlayer follows.
+let touchTargetX = null;      // canvas x the fighter is being dragged toward
+let touchOriginFingerX = 0;   // finger's canvas x when the drag began
+let touchOriginPlayerX = 0;   // ship x when the drag began
 
 function updatePlayer(dt) {
   if (!player.alive) return;
 
-  let dx = 0;
-  if (moveDir !== 0) dx = moveDir * PLAYER_SPEED;
-  if (touchMoveX !== 0) dx = touchMoveX * PLAYER_SPEED;
-  touchMoveX = 0;   // consume-and-clear: each touchmove event re-sets it
-
-  player.x += dx * dt / 1000;
+  if (moveDir !== 0) {
+    player.x += moveDir * PLAYER_SPEED * dt / 1000;
+  } else if (touchTargetX !== null) {
+    // Follow the finger at up to TOUCH_SENSITIVITY x keyboard speed, capped to
+    // one frame's travel so a fast drag cannot teleport the ship.
+    const maxStep = PLAYER_SPEED * TOUCH_SENSITIVITY * dt / 1000;
+    const delta = touchTargetX - player.x;
+    player.x += Math.abs(delta) <= maxStep ? delta : Math.sign(delta) * maxStep;
+  }
 
   // Clamp to screen
-  const halfW = player.dualFighter ? 30 : 24;
+  const halfW = player.dualFighter ? DUAL_HALF_W : PLAYER_HALF_W;
   player.x = Math.max(halfW, Math.min(W - halfW, player.x));
 
   if (player.invTimer > 0) player.invTimer -= dt;
@@ -1681,7 +1655,7 @@ function firePlayerBullet() {
   if (activeCount >= maxB) return;
   if (player.fireTimer > 0) return;
 
-  player.fireTimer = 120;
+  player.fireTimer = FIRE_COOLDOWN_MS;
 
   if (player.dualFighter) {
     bullets.push({ x: player.x - 12, y: player.y - 10, active: true });
@@ -1796,18 +1770,23 @@ function destroyEnemy(enemy) {
   enemy.state = 'dead';
   enemy.alive = false;
 
+  // Only a genuine dive pays the dive rate. An enemy still on its entry path
+  // has not dived, so it pays the formation rate (see the README scoring table).
+  const diving = wasState === 'diving';
   let pts = 0;
   if (enemy.type === 'bee') {
-    pts = wasState === 'formation' ? SCORE.BEE_FORM : SCORE.BEE_DIVE;
+    pts = diving ? SCORE.BEE_DIVE : SCORE.BEE_FORM;
   } else if (enemy.type === 'butterfly') {
-    pts = wasState === 'formation' ? SCORE.BUTTERFLY_FORM : SCORE.BUTTERFLY_DIVE;
+    pts = diving ? SCORE.BUTTERFLY_DIVE : SCORE.BUTTERFLY_FORM;
   } else if (enemy.type === 'boss') {
-    if (wasState === 'formation') {
+    if (!diving) {
       pts = SCORE.BOSS_FORM;
     } else {
+      // Escorts still flying with the boss count even after they finished their
+      // own dive path, so one that bottomed out early is not dropped.
       const escorts = enemy.escortIds.filter(id => {
         const esc = enemies[id];
-        return esc && esc.alive && esc.state === 'diving';
+        return esc && esc.alive;
       }).length;
       pts = escorts >= 2 ? SCORE.BOSS_DIVE_2 : escorts >= 1 ? SCORE.BOSS_DIVE_1 : SCORE.BOSS_DIVE_0;
     }
@@ -1859,7 +1838,7 @@ function killPlayer() {
   if (player.dualFighter) {
     player.dualFighter = false;
     player.alive = true;
-    player.invTimer = 2000;
+    player.invTimer = PLAYER_INVULN_MS;
     spawnExplosion(player.x + 15, player.y);
     playSound('playerDeath');
     return;
@@ -1877,24 +1856,32 @@ function killPlayer() {
 function respawnPlayer() {
   player.alive = true;
   player.x = W / 2;
-  player.invTimer = 2000;
+  player.invTimer = PLAYER_INVULN_MS;
   player.dualFighter = false;
 }
 
 function checkExtraLife() {
-  if (score >= extraLifeNext) {
+  // while, not if: a single large award (e.g. the challenge perfect bonus)
+  // must never step over a threshold without paying it out.
+  while (score >= extraLifeNext) {
     livesRemaining++;
     playSound('extraLife');
-    if (extraLifeNext === EXTRA_LIFE_FIRST) {
-      extraLifeNext = EXTRA_LIFE_FIRST + EXTRA_LIFE_INTERVAL;
-    } else {
-      extraLifeNext += EXTRA_LIFE_INTERVAL;
-    }
+    extraLifeNext = extraLifeNext === EXTRA_LIFE_FIRST
+      ? EXTRA_LIFE_FIRST + EXTRA_LIFE_INTERVAL
+      : extraLifeNext + EXTRA_LIFE_INTERVAL;
   }
 }
 
 function saveHighScore() {
   try { localStorage.setItem('galaga_hs', highScore.toString()); } catch (e) {}
+}
+
+// Raising the stored best is separate from the game-over screen's NEW HIGH
+// SCORE badge, because quitting mid-game must persist the score too.
+function persistHighScore() {
+  if (score <= highScore) return;
+  highScore = score;
+  saveHighScore();
 }
 
 // Single game-over path: every route to 'gameover' must record the high score.
@@ -1903,8 +1890,7 @@ function endGame() {
   if (tractorBeam) cancelTractorBeam();
   if (score > highScore) {
     newHighScore = true;
-    highScore = score;
-    saveHighScore();
+    persistHighScore();
   }
 }
 
@@ -2034,7 +2020,7 @@ function updateChallengeStage(dt) {
 
   // Advance to next wave on timer
   challengeWaveTimer += dt;
-  if (challengeWaveTimer >= 2000) {
+  if (challengeWaveTimer >= CHALLENGE_WAVE_MS) {
     challengeWaveTimer = 0;
     challengeWaveIndex++;
   }
@@ -2083,7 +2069,11 @@ function getChallengeBonus() {
 const keys = {};
 const justPressed = {};
 let touchActive = false;
-let touchStartX = 0;
+
+// Map a client-space x to canvas-space x (used by the drag handlers).
+function clientToCanvasX(clientX, rect) {
+  return rect.width > 0 ? (clientX - rect.left) * (W / rect.width) : W / 2;
+}
 let autoFire = false;
 
 document.addEventListener('keydown', (e) => {
@@ -2101,13 +2091,47 @@ document.addEventListener('keyup', (e) => {
   keys[e.code] = false;
 });
 
+// Losing focus must not cost a life: park the game on the pause screen the same
+// way the P key does, so enemies cannot keep diving at an inert player.
+function pauseIfPlaying() {
+  if (phase === 'playing' || phase === 'entering' || phase === 'challenge') {
+    if (tractorBeam) stopTractorBeamSound();
+    pausedFrom = phase;
+    phase = 'paused';
+  }
+}
+
 // Safety: clear all stuck keys when window loses focus
 window.addEventListener('blur', () => {
   for (const k in keys) keys[k] = false;
   for (const k in justPressed) justPressed[k] = false;
   touchActive = false;
-  touchMoveX = 0;
+  touchTargetX = null;
   autoFire = false;
+  pauseIfPlaying();
+});
+
+// blur does not fire for every way a page can stop being visible (screen lock,
+// some OS gestures), so cover the visibility API as well.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    for (const k in keys) keys[k] = false;
+    touchActive = false;
+    touchTargetX = null;
+    autoFire = false;
+    pauseIfPlaying();
+    if (audioCtx && audioCtx.state === 'running') audioCtx.suspend().catch(() => {});
+  } else if (audioCtx && audioCtx.state === 'suspended' && soundEnabled) {
+    audioCtx.resume().catch(() => {});
+  }
+});
+
+// Mouse/pen start. Touch has its own handlers below, so ignore touch pointers
+// here to avoid interfering with drag-to-move.
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') return;
+  initAudio();
+  if (phase === 'menu' || phase === 'gameover') justPressed['Space'] = true;
 });
 
 canvas.addEventListener('touchstart', (e) => {
@@ -2115,8 +2139,12 @@ canvas.addEventListener('touchstart', (e) => {
   initAudio();
   const touch = e.touches[0];
   touchActive = true;
-  touchStartX = touch.clientX;
   autoFire = true;
+
+  const rect = canvas.getBoundingClientRect();
+  touchOriginFingerX = clientToCanvasX(touch.clientX, rect);
+  touchOriginPlayerX = player.x;
+  touchTargetX = player.x;
 
   if (phase === 'menu' || phase === 'gameover') {
     justPressed['Space'] = true;
@@ -2127,29 +2155,33 @@ canvas.addEventListener('touchmove', (e) => {
   e.preventDefault();
   if (!touchActive) return;
   const touch = e.touches[0];
-  const dx = touch.clientX - touchStartX;
-  touchStartX = touch.clientX;
-
-  const canvasRect = canvas.getBoundingClientRect();
-  const scaleRatio = canvasRect.width > 0 ? W / canvasRect.width : 1;
-  touchMoveX = Math.max(-1, Math.min(1, dx * scaleRatio * TOUCH_SENSITIVITY / PLAYER_SPEED * 60));
+  const rect = canvas.getBoundingClientRect();
+  const fingerX = clientToCanvasX(touch.clientX, rect);
+  touchTargetX = touchOriginPlayerX + (fingerX - touchOriginFingerX) * TOUCH_SENSITIVITY;
 }, { passive: false });
 
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
   touchActive = false;
-  touchMoveX = 0;
+  touchTargetX = null;
   autoFire = false;
 }, { passive: false });
 
 canvas.addEventListener('touchcancel', (e) => {
   e.preventDefault();
   touchActive = false;
-  touchMoveX = 0;
+  touchTargetX = null;
   autoFire = false;
 }, { passive: false });
 
 document.body.addEventListener('touchmove', (e) => { e.preventDefault(); }, { passive: false });
+
+// The three keys that abandon a run, checked identically at every phase.
+const QUIT_KEYS = ['Escape', 'KeyQ', 'KeyX'];
+
+function quitPressed() {
+  return QUIT_KEYS.some(k => justPressed[k]);
+}
 
 function clearJustPressed() {
   for (const k in justPressed) justPressed[k] = false;
@@ -2159,6 +2191,7 @@ function clearJustPressed() {
 // state so nothing leaks across sessions (e.g. tractor-beam drone, rescue ship).
 function quitToMenu() {
   cancelTractorBeam();
+  persistHighScore();   // quitting mid-game must not discard a new best
   _rescueShips = [];
   enemyBombs = [];
   phase = 'menu';
@@ -2197,18 +2230,19 @@ function processInput(dt) {
         phase = 'paused';
       }
       // Quit to menu
-      if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
+      if (quitPressed()) {
         quitToMenu();
       }
       break;
 
     case 'paused':
       if (justPressed['KeyP'] || justPressed['Space']) {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
         if (tractorBeam && (tractorBeam.phase === 'beaming' || tractorBeam.phase === 'capturing')) startTractorBeamSound();   // resume the drone
         phase = pausedFrom;
       }
       // Quit from pause
-      if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
+      if (quitPressed()) {
         quitToMenu();
       }
       break;
@@ -2216,21 +2250,22 @@ function processInput(dt) {
     case 'stageIntro':
     case 'dying':
       // Allow quitting during timed overlays/animations
-      if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
+      if (quitPressed()) {
         quitToMenu();
       }
       break;
 
     case 'challengeResult':
       // Quitting the result screen still awards the pending bonus first.
-      if (justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
+      if (quitPressed()) {
         score += getChallengeBonus();
+        checkExtraLife();
         quitToMenu();
       }
       break;
 
     case 'gameover':
-      if (justPressed['Space'] || justPressed['Enter'] || justPressed['Escape'] || justPressed['KeyQ'] || justPressed['KeyX']) {
+      if (justPressed['Space'] || justPressed['Enter'] || quitPressed()) {
         quitToMenu();
       }
       break;
@@ -2332,6 +2367,7 @@ function toggleSound() {
   const btn = document.getElementById('sound-btn');
   btn.textContent = 'SOUND: ' + (soundEnabled ? 'ON' : 'OFF');
   btn.classList.toggle('on', soundEnabled);
+  btn.setAttribute('aria-pressed', soundEnabled ? 'true' : 'false');
 }
 
 function update(dt) {
@@ -2405,6 +2441,7 @@ function update(dt) {
       challengeResultTimer -= dt;
       if (challengeResultTimer <= 0) {
         score += getChallengeBonus();   // perfect award on a full clear, 0 otherwise
+        checkExtraLife();
         stageNum++;
         phase = 'stageIntro';
         stageIntroTimer = STAGE_INTRO_MS;
@@ -2612,21 +2649,11 @@ function drawEnemies() {
     const e = list[i];
     if (!e.alive || e.state === 'waiting') continue;
 
-    let spriteName;
     const frame = e.animFrame || 0;
-    switch (e.type) {
-      case 'boss':
-        spriteName = e.hitOnce ? 'bossHit0' : 'boss' + frame;
-        break;
-      case 'butterfly':
-        spriteName = 'butterfly' + frame;
-        break;
-      case 'bee':
-        spriteName = 'bee' + frame;
-        break;
-      default:
-        spriteName = 'bee' + frame;
-    }
+    // Only three enemy types are ever created, so this lookup is total.
+    const spriteName = e.type === 'boss'
+      ? (e.hitOnce ? 'bossHit0' : 'boss' + frame)
+      : e.type + frame;   // butterfly0/1, bee0/1 — sprite keys match the type name
 
     ctx.save();
     ctx.translate(e.x, e.y);
@@ -2687,8 +2714,8 @@ function drawTractorBeamRender() {
   if (!tractorBeam) return;
   if (tractorBeam.phase !== 'beaming' && tractorBeam.phase !== 'capturing') return;
 
-  // Derive geometry from the boss enemy that owns the beam — match the fields
-  // set by startTractorBeamAttack (boss.x/y, beamWidth, maxBeamWidth, beamY).
+  // Derive geometry from the boss enemy that owns the beam — the renderer reads
+  // the boss position and the live beam width; nothing else is stored on it.
   const bx = tractorBeam.boss.x;
   const by = tractorBeam.boss.y + 24;   // beam emanates from the boss underside
   const beamW = Math.max(8, tractorBeam.beamWidth || 0);
@@ -2950,6 +2977,20 @@ function drawChallengeResults() {
   }
 }
 
+// The play-field layer stack. Phases differ only in which optional layers they
+// include, so they all share one ordered draw pipeline.
+function drawWorld({ beam = true, rescue = true, withPlayer = true } = {}) {
+  drawEnemies();
+  drawBullets();
+  drawEnemyBombsRender();
+  if (beam) drawTractorBeamRender();
+  if (rescue) drawRescueShipRender();
+  if (withPlayer) drawPlayer();
+  drawParticles();
+  drawScorePops();
+  drawHUD();
+}
+
 function render() {
   ctx.fillStyle = C_BG;
   ctx.fillRect(0, 0, W, H);
@@ -2966,45 +3007,18 @@ function render() {
       drawChallengeResults();
       break;
     case 'gameover':
-      drawEnemies();
-      drawBullets();
-      drawEnemyBombsRender();
-      drawPlayer();
-      drawParticles();
-      drawScorePops();
-      drawHUD();
+      drawWorld({ beam: false, rescue: false });   // no live beam; the ship is still drawn
       drawGameOverScreen();
       break;
     case 'paused':
-      drawEnemies();
-      drawBullets();
-      drawEnemyBombsRender();
-      drawTractorBeamRender();
-      drawRescueShipRender();
-      drawPlayer();
-      drawParticles();
-      drawScorePops();
-      drawHUD();
+      drawWorld();
       drawPauseOverlay();
       break;
     case 'dying':
-      drawEnemies();
-      drawBullets();
-      drawEnemyBombsRender();
-      drawParticles();
-      drawScorePops();
-      drawHUD();
+      drawWorld({ beam: false, rescue: false, withPlayer: false });   // ship already exploded
       break;
     default:
-      drawEnemies();
-      drawBullets();
-      drawEnemyBombsRender();
-      drawTractorBeamRender();
-      drawRescueShipRender();
-      drawPlayer();
-      drawParticles();
-      drawScorePops();
-      drawHUD();
+      drawWorld();
       break;
   }
 }

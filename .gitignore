@@ -3,3 +3,7 @@
 
 # Browser-QA artifacts (Playwright MCP output)
 .playwright-mcp/
+
+# Local agent/editor state — machine-specific, not part of the project
+.claude/
+tasks/

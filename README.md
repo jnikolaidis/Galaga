@@ -18,7 +18,7 @@ Open `index.html` in any modern browser — double-click it or serve the directo
 
 Sound starts off — click the **SOUND** button to toggle it on.
 
-**Touch:** drag to move, auto-fire while touching, tap to start.
+**Pointer:** click the canvas to start (or restart). **Touch:** drag to move, auto-fire while touching, tap to start.
 
 ## Gameplay
 
@@ -33,6 +33,8 @@ Sound starts off — click the **SOUND** button to toggle it on.
   | Butterfly | 80 | 160 |
   | Boss Galaga | 150 | 400 alone, 800 with 1 escort, 1600 with 2 escorts |
 
+  An escort counts toward the boss bonus as long as it is still alive, even if it has already finished its own dive. Enemies still flying their entry path have not dived yet, so they pay the "in formation" rate.
+
 - **Extra lives:** awarded at 20,000 points, then every 70,000.
 
 ## Technical Notes
@@ -42,4 +44,8 @@ Sound starts off — click the **SOUND** button to toggle it on.
 - Sprites are drawn programmatically from pixel-art arrays — no image files.
 - All sound effects are synthesized procedurally with the Web Audio API — no audio files.
 - The high score persists in `localStorage` (key `galaga_hs`).
-- `galaga.html` is a standalone copy of the game for distribution. It is byte-identical to `index.html` — after editing `index.html`, re-sync it (`cp index.html galaga.html`).
+- `galaga.html` is a standalone copy of the game for distribution. It is byte-identical to `index.html` — after editing `index.html`, re-sync it (`cp index.html galaga.html`). CI (`.github/workflows/checks.yml`) fails the build if the two copies drift apart.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
