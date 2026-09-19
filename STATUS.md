@@ -5,27 +5,24 @@ change (see AGENTS.md → Milestone banking)._
 
 ## Current state
 
-- **Branch:** `main`, in sync with `origin/main` — **but the working tree
-  carries a large UNCOMMITTED change set** (as of 2026-09-19): `index.html`
-  and `galaga.html` each modified (~462 insertions / 434 deletions; the two
-  copies are byte-identical to each other), modified `.gitignore`, `README.md`,
-  plus untracked `.github/` (the CI workflow) and `LICENSE`. `CLAUDE.md` was
-  also modified-uncommitted; it has since been replaced by the thin-pointer
-  pattern (its gotchas live in MEMORY.md now).
-- **Phase:** audit/remediation in flight — see `tasks/todo.md`.
-- Any session starting here must first understand this uncommitted work before
-  touching anything (boot sequence step 5).
+- **Branch:** `main`, in sync with `origin/main` (as of 2026-09-19); working
+  tree clean.
+- **Phase:** the audit/remediation change set — the `index.html`/`galaga.html`
+  rework (~462 insertions / 434 deletions; the two copies byte-identical to
+  each other), `.gitignore`, `README.md`, `LICENSE` and the `.github/` CI
+  workflow — was committed as `73ea550` (2026-09-19), with the SuperExecutor
+  contract landing straight after as `cf905aa`. Remaining work, if any, is
+  tracked in `tasks/todo.md`.
 
 ## Board
 
-- [ ] Review, verify, and commit (or explicitly discard) the uncommitted
-  game/CI/license change set — John's call on timing.
-- [ ] Close remaining items in `tasks/todo.md`, if any.
+- [x] Review, verify, and commit the game/CI/license change set — done:
+  committed as `73ea550`.
+- [ ] Close remaining items in `tasks/todo.md`, if any (John's call).
 
 ## Open decisions
 
-- Whether the uncommitted change set ships as-is or gets another pass —
-  waiting on John.
+- None open. (Decisions waiting on John live here.)
 
 ## Session handoff
 
@@ -41,5 +38,20 @@ change (see AGENTS.md → Milestone banking)._
   (not started by the contract session).
 - **Exact next steps:** boot per AGENTS.md; reconcile the uncommitted work
   (diff review → verify → commit or discard) with John.
-- **Waiting on John:** fate of the uncommitted change set; review and commit
-  of the new contract files.
+- **Waiting on John:** nothing — both items resolved later the same day: the
+  game/CI/license change set was committed as `73ea550` and the contract as
+  `cf905aa` (see the sweep block below).
+
+### 2026-09-19 — Doc-drift sweep (workspace-wide)
+
+- **Done:** reconciled this file against real git state. The Current state,
+  Board and Open decisions sections above described the audit/remediation
+  change set as UNCOMMITTED and awaiting John's call; it was in fact committed
+  as `73ea550`, and the working tree is clean and in sync with `origin/main`.
+  Those sections are corrected above. (The "NOT touched" note in the
+  contract-install block records that session's own action, superseded by the
+  commit that followed it.) No product code changed by this sweep.
+- **In flight:** nothing.
+- **Exact next steps:** close any remaining items in `tasks/todo.md` — John's
+  call whether to pursue.
+- **Waiting on John:** review and push this documentation correction.
