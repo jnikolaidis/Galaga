@@ -55,3 +55,14 @@ change (see AGENTS.md → Milestone banking)._
 - **Exact next steps:** close any remaining items in `tasks/todo.md` — John's
   call whether to pursue.
 - **Waiting on John:** review and push this documentation correction.
+
+### 2026-09-20 — PROJECT.md phase drift fixed
+
+- **Done:** corrected PROJECT.md's Phases line, which still called the
+  audit/remediation change set "uncommitted ... in flight as of 2026-09-19";
+  it was committed as `73ea550`. Logged in CHANGELOG.md. No product code
+  changed; `index.html`/`galaga.html` untouched.
+- **In flight:** nothing.
+- **Exact next steps:** close any remaining items in `tasks/todo.md` — John's
+  call.
+- **Waiting on John:** review and push this documentation correction.

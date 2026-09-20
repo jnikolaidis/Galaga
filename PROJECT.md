@@ -17,8 +17,9 @@ on jnikolaidis.com from the site repo.
 
 ## Phases
 
-- Build (complete) → audit/remediation (see `tasks/todo.md`; uncommitted
-  change set in flight as of 2026-09-19) → maintenance.
+- Build (complete) → audit/remediation (change set committed as `73ea550`,
+  2026-09-19; remaining items, if any, tracked in `tasks/todo.md`) →
+  maintenance.
 
 ## Decisions
 

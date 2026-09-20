@@ -24,3 +24,11 @@ Never edit or delete entries._
   action, superseded by the commit that followed it. Documentation-truth fix
   only; no product code changed. Verified with `git log`, `git status`, and a
   workspace-wide grep for the pre-rename path.
+
+## 2026-09-20 — PROJECT.md phase drift fixed
+
+- PROJECT.md's Phases line still described the audit/remediation change set as
+  "uncommitted ... in flight as of 2026-09-19"; it was committed as `73ea550`
+  the same day. Corrected the line to cite the commit and point remaining work
+  at `tasks/todo.md`. Documentation-truth fix only; no product code changed.
+  Verified by diff read and `git log`.
